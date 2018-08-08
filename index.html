@@ -1,0 +1,397 @@
+
+
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>Web Client</title>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    </head>
+    <body>
+    <div id="loginContainer">
+     <input id="login" value="userA" placeholder="Username">
+     <input id="deviceID" value="1" placeholder="deviceID">
+     <input id="company" value="companyA" placeholder="Company">
+     <button onclick="user_login();">Enter Username</button>
+    </div>
+    <div>
+        <button id="start-recording" disabled>Start Recording</button>
+        <button id="stop-recording" disabled>Stop Recording</button>
+    </div>
+     <div id="callerIDContainer">
+          <input id="callerID" value="userA">
+          <button onclick="call_user();">Call User</button>
+     </div>
+     <video id="selfView" autoplay></video>
+     <div id="remoteViewContainer"></div>
+    </body>
+    <script src="https://cdn.WebRTC-Experiment.com/RecordRTC.js"></script>
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        var socket = io();
+
+        var RTCPeerConnection = window.RTCPeerConnection || window.mozRTCPeerConnection || window.webkitRTCPeerConnection || window.msRTCPeerConnection;
+        var RTCSessionDescription = window.RTCSessionDescription || window.mozRTCSessionDescription || window.webkitRTCSessionDescription || window.msRTCSessionDescription;
+        navigator.getUserMedia = navigator.getUserMedia || navigator.mozGetUserMedia || navigator.webkitGetUserMedia || navigator.msGetUserMedia;
+
+    var twilioIceServers = [
+        { url: 'stun:global.stun.twilio.com:3478?transport=udp' }
+        // { url: 'turn:global.turn.twilio.com:3478?transport=udp',
+        //   username: 'ea757ad2c42b932c7f2abe480295e7eb039dc2b13b78c86bc412818ed51e5eea',
+        //   credential: 'MPnnojPRoPDI+B3kLONGF9P440Lb8NkrTq+FxxJBVro=' },
+        // { url: 'turn:global.turn.twilio.com:3478?transport=tcp',
+        //   username: 'ea757ad2c42b932c7f2abe480295e7eb039dc2b13b78c86bc412818ed51e5eea',
+        //   credential: 'MPnnojPRoPDI+B3kLONGF9P440Lb8NkrTq+FxxJBVro=' },
+        // { url: 'turn:global.turn.twilio.com:443?transport=tcp',
+        //   username: 'ea757ad2c42b932c7f2abe480295e7eb039dc2b13b78c86bc412818ed51e5eea',
+        //   credential: 'MPnnojPRoPDI+B3kLONGF9P440Lb8NkrTq+FxxJBVro=' } 
+    ];
+
+    var configuration = {"iceServers": [{"url": "stun:stun.l.google.com:19302"}]};
+    // configuration.iceServers = twilioIceServers;
+    var users = {};
+    var pcPeers = {};
+    var selfView = document.getElementById("selfView");
+    var remoteViewContainer = document.getElementById("remoteViewContainer");
+    var localStream;
+    let username;
+    let busy = false;
+    var incallwith = "";
+    var startRecording = document.getElementById('start-recording');
+    var stopRecording = document.getElementById('stop-recording');
+    var recordAudio;
+    var login = document.getElementById('login').value;
+    var deviceID = document.getElementById('deviceID').value;
+    var company = document.getElementById('company').value;
+    var currUser = document.getElementById('callerID').value;
+
+    startRecording.onclick = function() {
+        startRecording.disabled = true;
+        navigator.getUserMedia({
+            audio: true,
+            video: true
+        }, function(stream) {
+            mediaStream = stream;
+
+            recordAudio = RecordRTC(stream, {
+                type: 'audio',
+                mimeType: 'audio/webm',
+            });
+
+            recordAudio.startRecording();
+
+            stopRecording.disabled = false;
+        }, function(error) {
+            alert(JSON.stringify(error));
+        });
+    };
+
+    stopRecording.onclick = function() {
+        startRecording.disabled = false;
+        stopRecording.disabled = true;
+
+        var login = document.getElementById('login').value;
+        var deviceID = document.getElementById('deviceID').value;
+        var company = document.getElementById('company').value;
+        var currUser = document.getElementById('callerID').value;
+
+        console.log(callerID)
+        // stop audio recorder
+        recordAudio.stopRecording(function() {
+            // get audio data-URL
+            recordAudio.getDataURL(function(audioDataURL) {
+                var files = {
+                    type: "voice_mail",
+                    company: company,
+                    to: currUser,
+                    from: login,
+                    audio: {
+                        type: recordAudio.getBlob().type || 'audio/aac',
+                        dataURL: audioDataURL
+                    }
+                };
+                console.log("audioDataURL: " + audioDataURL)
+                socket.emit('message', files);
+                if (mediaStream) mediaStream.stop();
+            });
+        });
+    };
+
+    socket.on('ffmpeg-error', function(error) {
+        alert(error);
+    });
+
+    function getLocalStream() {
+        navigator.getUserMedia({ "audio": true, "video": true }, function (stream) {
+            localStream = stream;
+            selfView.src = URL.createObjectURL(stream);
+            selfView.muted = true;
+        }, logError);
+    }
+
+    socket.on('connect', function(data) {
+        console.log('connect');
+        getLocalStream();
+        startRecording.disabled = false;
+    });
+
+    function logError(error) {
+        console.log("logError", error);
+    }
+
+    function createPC(socketId, isOffer) {
+        var pc = new RTCPeerConnection(configuration);
+        pcPeers[socketId] = pc;
+
+        pc.onicecandidate = function (event) {
+            console.log('onicecandidate', event);
+            if (event.candidate) {
+            socket.emit('exchange', {'to': socketId, 'candidate': event.candidate });
+            }
+        };
+
+        function createOffer() {
+            pc.createOffer(function(desc) {
+            console.log('createOffer', desc);
+            pc.setLocalDescription(desc, function () {
+                console.log('setLocalDescription', pc.localDescription);
+                socket.emit('exchange', {'to': socketId, 'sdp': pc.localDescription });
+            }, logError);
+            }, logError);
+        }
+
+        pc.onnegotiationneeded = function () {
+            console.log('onnegotiationneeded');
+            if (isOffer) {
+            createOffer();
+            }
+        }
+
+        pc.oniceconnectionstatechange = function(event) {
+            console.log('oniceconnectionstatechange', event);
+            if (event.target.iceConnectionState === 'connected') {
+            createDataChannel();
+            }
+        };
+        pc.onsignalingstatechange = function(event) {
+            console.log('onsignalingstatechange', event);
+        };
+
+        pc.onaddstream = function (event) {
+            console.log('onaddstream', event);
+            var element = document.createElement('video');
+            element.id = "remoteView" + socketId;
+            element.autoplay = 'autoplay';
+            element.src = URL.createObjectURL(event.stream);
+            remoteViewContainer.appendChild(element);
+        };
+        pc.addStream(localStream);
+        function createDataChannel() {
+            if (pc.textDataChannel) {
+            return;
+            }
+            var dataChannel = pc.createDataChannel("text");
+
+            dataChannel.onerror = function (error) {
+            console.log("dataChannel.onerror", error);
+            };
+
+            dataChannel.onmessage = function (event) {
+            console.log("dataChannel.onmessage:", event.data);
+            var content = document.getElementById('textRoomContent');
+            content.innerHTML = content.innerHTML + '<p>' + socketId + ': ' + event.data + '</p>';
+            };
+
+            dataChannel.onopen = function () {
+            console.log('dataChannel.onopen');
+            var textRoom = document.getElementById('textRoom');
+            textRoom.style.display = "block";
+            };
+
+            dataChannel.onclose = function () {
+            console.log("dataChannel.onclose");
+            };
+
+            pc.textDataChannel = dataChannel;
+        }
+        return pc;
+    }
+
+    function exchange(data) {
+        var fromId = data.from;
+        var pc;
+        if (fromId in pcPeers) {
+            pc = pcPeers[fromId];
+        } else {
+            pc = createPC(fromId, false);
+        }
+
+        if (data.sdp) {
+            console.log('exchange sdp', data);
+            pc.setRemoteDescription(new RTCSessionDescription(data.sdp), function () {
+            if (pc.remoteDescription.type == "offer")
+                pc.createAnswer(function(desc) {
+                console.log('createAnswer', desc);
+                pc.setLocalDescription(desc, function () {
+                    console.log('setLocalDescription', pc.localDescription);
+                    socket.emit('exchange', {'to': fromId, 'sdp': pc.localDescription });
+                }, logError);
+                }, logError);
+            }, logError);
+        } else {
+            console.log('exchange candidate', data);
+            pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+        }
+    }
+
+    function user_login(){
+            var login = document.getElementById('login').value;
+            var deviceID = document.getElementById('deviceID').value;
+            var company = document.getElementById('company').value;
+            socket.send({
+                type: "login",
+                company: company,
+                room: login,
+                deviceID: deviceID
+            });
+    }
+        function call_user(){
+            var callerID = document.getElementById('callerID').value;
+          if (callerID == "") {
+            alert('Please enter caller ID');
+          } else {
+                //const roomid = username+"-"+callerID;
+                //join(roomid);
+            var callerIDContainer = document.getElementById('callerIDContainer');
+            callerIDContainer.parentElement.removeChild(callerIDContainer);
+                busy = true;
+                incallwith = callerID
+                socket.send({
+                 type: "call_user",
+                 name: callerID,
+                         callername: username
+              })
+          }
+        }
+        function onGettingCalled(data){
+        if(busy == false){
+            busy = true
+            incallwith = data.callername
+            var res = confirm(data.callername+" is calling you");
+            if(res == true){
+                console.log("call accepted");
+                // code
+                socket.send({
+                    type: "call_accepted",
+                    callername: data.callername,
+                    from: username
+                })
+
+                createPC(users[data.callername], true)
+
+            }else{
+            console.log("call rejected");
+                socket.send({
+                    type: "call_rejected",
+                    callername: data.callername,
+                    from: username
+                })
+                busy = false
+                incallwith = ""
+            }
+             }else{
+                 console.log("call busy");
+                 socket.send({
+                        type: "call_busy",
+                        callername: data.callername,
+                        from: username
+                 })
+
+             }
+            }
+         function onResponse(data){
+                switch(data.response){
+                    case "accepted":
+                    incallwith = data.responsefrom;
+                    console.log("Call accepted by :"+ data.responsefrom);
+                    // code
+                    break;
+                    case "rejected":
+                    console.log("Call rejected by :"+ data.responsefrom);
+                    busy = false;
+                    incallwith = ""
+                    break;
+                    case "busy":
+                    console.log(data.responsefrom+" call busy");
+                    busy = false;
+                    incallwith = ""
+                    break;
+                    default:
+                    console.log(data.responsefrom+" is offline");
+                    busy = false;
+                    incallwith = ""
+                }
+
+            }
+    socket.on('exchange', function(data){
+        exchange(data);
+    });
+    socket.on('connect', function(data) {
+          console.log('connect');
+        });
+        //when a user logs in
+        function onLogin(data) {
+
+             if (data.success === false) {
+                    alert("oops...try a different username");
+             } else {
+                 var loginContainer = document.getElementById('loginContainer');
+                 loginContainer.parentElement.removeChild(loginContainer);
+                 username = data.username;
+                 console.log("Login Successfull");
+                 console.log("logged in as :"+username);
+                 console.log("users:")
+                 console.log(data.userlist);
+
+                 users = data.userlist;
+             }
+        }
+        socket.on('roommessage', function(message){
+            var data = message;
+
+            switch(data.type) {
+                 case "login":
+                    console.log("New user : "+data.username + " " + data.socketId);
+                    users[data.username] = data.socketId
+                    console.log("users:")
+                    console.log(users)                        
+                    break;
+                 case "disconnect":
+                    console.log("User disconnected : "+data.username);
+                    delete users[data.username];
+                    console.log("users:")
+                    console.log(users)
+                 break;
+                default:
+                    break;
+            }
+        })
+    socket.on('message', function(message){
+            var data = message;
+
+            switch(data.type) {
+                 case "login":
+                        onLogin(data);
+                        break;
+                case "call_request":
+                      console.log("getting called");
+                        onGettingCalled(data);
+                        break;
+                case "call_response":
+                      onResponse(data);
+                      break;
+                default:
+                    break;
+            }
+    })
+  </script>
+</html>
